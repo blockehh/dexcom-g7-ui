@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dexcom G7 XIAO Receiver</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .header {
+            text-align: center;
+            color: #1d1d1f;
+        }
+        
+        .glucose-display {
+            text-align: center;
+            font-size: 3em;
+            font-weight: bold;
+            color: #007AFF;
+            margin: 20px 0;
+        }
+        
+        .trend {
+            text-align: center;
+            font-size: 1.2em;
+            margin: 10px 0;
+        }
+        
+        .status {
+            background: #e8f4fd;
+            border-left: 4px solid #007AFF;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 6px;
+        }
+        
+        .button {
+            background: #007AFF;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 5px;
+            width: 100%;
+        }
+        
+        .button:hover {
+            background: #0056b3;
+        }
+        
+        .button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .connected {
+            background: #28a745;
+        }
+        
+        .error {
+            background: #dc3545;
+            color: white;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+        
+        .log {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        
+        .timestamp {
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1 class="header">🩸 Dexcom G7 XIAO Receiver</h1>
+        <p style="text-align: center; color: #666;">Web Bluetooth Interface</p>
+    </div>
+
+    <div class="card">
+        <button id="connectBtn" class="button">📱 Connect to G7 Receiver</button>
+        <div id="connectionStatus" class="status">
+            Status: Disconnected
+        </div>
+    </div>
+
+    <div class="card" id="glucoseCard" style="display: none;">
+        <h2>Current Reading</h2>
+        <div id="glucoseValue" class="glucose-display">--</div>
+        <div id="trendInfo" class="trend">📈 Trend: Unknown</div>
+        <div id="timestamp" class="timestamp">Last updated: Never</div>
+    </div>
+
+    <div class="card" id="controlCard" style="display: none;">
+        <h3>Controls</h3>
+        <button id="scanBtn" class="button">🔍 Restart G7 Scan</button>
+        <button id="disconnectBtn" class="button">📵 Disconnect from G7</button>
+        <button id="statusBtn" class="button">📊 Refresh Status</button>
+    </div>
+
+    <div class="card">
+        <h3>Activity Log</h3>
+        <div id="log" class="log">Waiting for connection...\n</div>
+        <button id="clearLogBtn" class="button" style="background: #6c757d;">🗑️ Clear Log</button>
+    </div>
+
+    <script>
+        class G7ReceiverUI {
+            constructor() {
+                this.device = null;
+                this.server = null;
+                this.service = null;
+                this.commandChar = null;
+                this.statusChar = null;
+                this.dataChar = null;
+                this.connected = false;
+                
+                this.setupEventListeners();
+            }
+            
+            setupEventListeners() {
+                document.getElementById('connectBtn').addEventListener('click', () => this.connect());
+                document.getElementById('scanBtn').addEventListener('click', () => this.sendCommand('restart_scan'));
+                document.getElementById('disconnectBtn').addEventListener('click', () => this.sendCommand('disconnect'));
+                document.getElementById('statusBtn').addEventListener('click', () => this.sendCommand('get_status'));
+                document.getElementById('clearLogBtn').addEventListener('click', () => this.clearLog());
+            }
+            
+            async connect() {
+                try {
+                    this.log('🔍 Requesting Bluetooth device...');
+                    
+                    // Request device with G7 Receiver service
+                    this.device = await navigator.bluetooth.requestDevice({
+                        filters: [{
+                            name: 'XIAO-G7-Receiver'
+                        }],
+                        optionalServices: ['12345678-1234-1234-1234-123456789abc']
+                    });
+                    
+                    this.log(`📱 Found device: ${this.device.name}`);
+                    
+                    // Connect to GATT server
+                    this.server = await this.device.gatt.connect();
+                    this.log('🔗 Connected to GATT server');
+                    
+                    // Get service
+                    this.service = await this.server.getPrimaryService('12345678-1234-1234-1234-123456789abc');
+                    this.log('🔧 Found UI service');
+                    
+                    // Get characteristics
+                    this.commandChar = await this.service.getCharacteristic('12345678-1234-1234-1234-123456789abd');
+                    this.statusChar = await this.service.getCharacteristic('12345678-1234-1234-1234-123456789abe');
+                    this.dataChar = await this.service.getCharacteristic('12345678-1234-1234-1234-123456789abf');
+                    
+                    this.log('✅ All characteristics found');
+                    
+                    // Subscribe to notifications
+                    await this.statusChar.startNotifications();
+                    this.statusChar.addEventListener('characteristicvaluechanged', (e) => this.handleStatusUpdate(e));
+                    
+                    await this.dataChar.startNotifications();
+                    this.dataChar.addEventListener('characteristicvaluechanged', (e) => this.handleDataUpdate(e));
+                    
+                    this.connected = true;
+                    this.updateUI();
+                    this.log('🎉 Successfully connected to G7 Receiver!');
+                    
+                    // Get initial status
+                    this.sendCommand('get_status');
+                    
+                } catch (error) {
+                    this.log(`❌ Error connecting: ${error.message}`);
+                    this.showError(`Connection failed: ${error.message}`);
+                }
+            }
+            
+            async sendCommand(command) {
+                if (!this.connected || !this.commandChar) {
+                    this.log('❌ Not connected');
+                    return;
+                }
+                
+                try {
+                    const commandObj = { command: command };
+                    const commandJson = JSON.stringify(commandObj);
+                    
+                    this.log(`📤 Sending command: ${command}`);
+                    
+                    const encoder = new TextEncoder();
+                    await this.commandChar.writeValue(encoder.encode(commandJson));
+                    
+                } catch (error) {
+                    this.log(`❌ Error sending command: ${error.message}`);
+                }
+            }
+            
+            handleStatusUpdate(event) {
+                const decoder = new TextDecoder();
+                const statusJson = decoder.decode(event.target.value);
+                
+                try {
+                    const status = JSON.parse(statusJson);
+                    this.log(`📊 Status: ${status.state}`);
+                    
+                    document.getElementById('connectionStatus').innerHTML = 
+                        `Status: ${status.state}<br>Uptime: ${status.uptime || 0}s`;
+                    
+                } catch (error) {
+                    this.log(`❌ Error parsing status: ${error.message}`);
+                }
+            }
+            
+            handleDataUpdate(event) {
+                const decoder = new TextDecoder();
+                const dataJson = decoder.decode(event.target.value);
+                
+                try {
+                    const data = JSON.parse(dataJson);
+                    this.log(`🩸 Glucose data: ${data.glucose} ${data.units}`);
+                    
+                    // Update glucose display
+                    document.getElementById('glucoseValue').textContent = `${data.glucose}`;
+                    document.getElementById('trendInfo').textContent = `📈 Trend: ${data.trend_name}`;
+                    
+                    const date = new Date(data.timestamp * 1000);
+                    document.getElementById('timestamp').textContent = 
+                        `Last updated: ${date.toLocaleTimeString()}`;
+                    
+                    // Show glucose card
+                    document.getElementById('glucoseCard').style.display = 'block';
+                    
+                } catch (error) {
+                    this.log(`❌ Error parsing glucose data: ${error.message}`);
+                }
+            }
+            
+            updateUI() {
+                const connectBtn = document.getElementById('connectBtn');
+                const controlCard = document.getElementById('controlCard');
+                
+                if (this.connected) {
+                    connectBtn.textContent = '✅ Connected';
+                    connectBtn.classList.add('connected');
+                    connectBtn.disabled = true;
+                    controlCard.style.display = 'block';
+                } else {
+                    connectBtn.textContent = '📱 Connect to G7 Receiver';
+                    connectBtn.classList.remove('connected');
+                    connectBtn.disabled = false;
+                    controlCard.style.display = 'none';
+                    document.getElementById('glucoseCard').style.display = 'none';
+                }
+            }
+            
+            log(message) {
+                const logDiv = document.getElementById('log');
+                const timestamp = new Date().toLocaleTimeString();
+                logDiv.textContent += `[${timestamp}] ${message}\n`;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+            
+            clearLog() {
+                document.getElementById('log').textContent = '';
+            }
+            
+            showError(message) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error';
+                errorDiv.textContent = message;
+                document.body.insertBefore(errorDiv, document.body.firstChild);
+                
+                setTimeout(() => {
+                    errorDiv.remove();
+                }, 5000);
+            }
+        }
+        
+        // Initialize the UI when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            if ('bluetooth' in navigator) {
+                new G7ReceiverUI();
+            } else {
+                document.body.innerHTML = `
+                    <div class="card">
+                        <h1 class="header">❌ Web Bluetooth Not Supported</h1>
+                        <p>This browser doesn't support Web Bluetooth. Please use:</p>
+                        <ul>
+                            <li>Chrome on Android/Windows/Mac</li>
+                            <li>Edge on Windows</li>
+                            <li>Chrome on iOS (experimental)</li>
+                        </ul>
+                    </div>
+                `;
+            }
+        });
+    </script>
+</body>
+</html> 
